@@ -257,7 +257,8 @@ def apply_choice(shot, tier, folder, reason, by, title=""):
             state[dest.name] = time.time()
             save_state(folder, sub, state)
     with open(folder / "triage-log.tsv", "a", encoding="utf-8") as log:
-        log.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{tier}\t{by}\t{shot.name}\t{reason}\n")
+        new = dest.name if dest else ""
+        log.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{tier}\t{by}\t{shot.name}\t{new}\t{reason}\n")
     print(f"{datetime.now():%H:%M:%S}  {tier:<12} ({by})  {shot.name}" + (f" -> {dest.name}" if dest else ""))
 
 
