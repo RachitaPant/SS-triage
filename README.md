@@ -23,7 +23,8 @@ Windows only (it uses the Windows Recycle Bin). Python 3.9+, standard library on
 ```bash
 # local, private (default): needs Ollama + a vision model
 ollama pull moondream
-python ss_triage.py --model moondream
+ollama pull qwen2.5:3b-instruct
+python ss_triage.py
 
 # no model, simple filename rules: for trying the popup
 python ss_triage.py --fake

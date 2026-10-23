@@ -20,7 +20,8 @@ Usage:
     python ss_triage.py --fake             # no model (for testing)
     python ss_triage.py --expire 7 --timeout 8
 
-Needs Ollama with a vision model, e.g.:  ollama pull qwen2.5vl:3b
+Needs Ollama: a small vision model describes (moondream), a text model
+decides (qwen2.5:3b-instruct). Both fit on an 8 GB laptop.
 Local mode: images never leave your machine.
 API mode (--api): needs OPENROUTER_API_KEY; images ARE uploaded to OpenRouter.
 """
@@ -75,18 +76,45 @@ tier must be one of:
 If anything sensitive is visible, choose "sensitive".
 reason: under 8 words, describing it WITHOUT repeating any secret."""
 
+TEXT_PROMPT = """Someone took a screenshot. Pick where it should be filed.
+Reply with only JSON: {"tier": "...", "reason": "..."}
+tier must be one of:
+- "class_notes": lecture slides, notes, textbooks, whiteboards, assignments
+- "chats": WhatsApp/Telegram/Instagram/Discord or any messaging conversation
+- "inspo": aesthetic inspiration: outfits, room decor, art, design, moodboards
+- "read_later": articles, posts, threads, videos, products, links
+- "sent": a code snippet, an error, or a small piece of an app or page
+- "important": receipts, payments, tickets, bookings, addresses, deadlines
+- "sensitive": ONLY if the description explicitly mentions a password, login,
+  OTP, ID card, passport, or bank/card number. Otherwise never pick this.
+- "bin": memes, jokes, home/lock screens, blank or accidental captures, games
+reason: under 8 words saying what it shows.
+
+Description of the screenshot:
+"""
+
 
 # ---------- classification ----------
 
-def ask_model(path, model):
-    img = base64.b64encode(path.read_bytes()).decode()
-    body = json.dumps({"model": model, "prompt": PROMPT, "images": [img],
-                       "format": "json", "stream": False}).encode()
-    req = urllib.request.Request(OLLAMA_URL, body,
+def ollama(payload):
+    req = urllib.request.Request(OLLAMA_URL, json.dumps({**payload, "stream": False}).encode(),
                                  {"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
-        data = json.loads(json.loads(r.read())["response"])
-    return parse_answer(data)
+        return json.loads(r.read())["response"]
+
+
+def ask_model(path, model, text_model):
+    img = base64.b64encode(path.read_bytes()).decode()
+    if not text_model:  # one capable vision model does everything
+        return parse_answer(json.loads(ollama(
+            {"model": model, "prompt": PROMPT, "images": [img], "format": "json"})))
+    # Small vision models (moondream) can't follow an 8-option prompt; they echo
+    # the first option. So: the vision model only describes, a text model decides.
+    caption = ollama({"model": model, "images": [img], "prompt":
+                      "Describe this screenshot in two sentences: what app or kind "
+                      "of content it is, and what it shows. Quote any visible title."})
+    return parse_answer(json.loads(ollama({"model": text_model, "format": "json",
+                                           "prompt": TEXT_PROMPT + caption.strip()})))
 
 
 def ask_api(path, model):
@@ -110,8 +138,12 @@ def ask_api(path, model):
 
 def parse_answer(data):
     tier = str(data.get("tier", "")).lower()
+    reason = str(data.get("reason", "")).strip().lower()
     if tier not in KEYS:
         raise ValueError(f"model said {tier!r}")
+    # A reason that is empty or just repeats the category means it didn't really look.
+    if not reason or reason.replace("_", " ") in (tier.replace("_", " "), "..."):
+        raise ValueError("model gave no real reason")
     return tier, str(data.get("reason", ""))[:60]
 
 
@@ -274,7 +306,7 @@ class Popup:
             elif self.args.api:
                 res = ask_api(self.shot, self.args.api_model)
             else:
-                res = ask_model(self.shot, self.args.model)
+                res = ask_model(self.shot, self.args.model, self.args.text_model)
             self.results.put(res)
         except Exception as e:
             self.results.put(e)
@@ -330,7 +362,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path, nargs="?", default=DEFAULT_DIR)
-    ap.add_argument("--model", default="qwen2.5vl:3b")
+    ap.add_argument("--model", default="moondream", help="vision model (describes the screenshot)")
+    ap.add_argument("--text-model", default="qwen2.5:3b-instruct",
+                    help="text model that picks the folder; \"\" = let --model do it all")
     ap.add_argument("--api", action="store_true",
                     help="use a free hosted open-weight model (OpenRouter) instead of Ollama")
     ap.add_argument("--api-model", default="google/gemma-4-26b-a4b-it:free")
