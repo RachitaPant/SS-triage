@@ -32,6 +32,7 @@ import json
 import os
 import queue
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -70,8 +71,6 @@ tier must be one of:
 - "chats": WhatsApp/Telegram/Instagram/Discord or any messaging conversation
 - "inspo": aesthetic inspiration: outfits, room decor, art, design, moodboards, pins
 - "read_later": articles, posts, threads, videos, products, links to check later
-- "sent": a quick capture made only to share or paste somewhere: a code snippet,
-  an error, a small piece of a page or app, a reel/post to forward to a friend
 - "bin": memes, jokes, home/lock screens, blank or accidental captures, games
 If anything sensitive is visible, choose "sensitive".
 reason: under 8 words, describing it WITHOUT repeating any secret."""
@@ -82,15 +81,14 @@ tier must be one of:
 - "class_notes": lecture slides, notes, textbooks, whiteboards, assignments
 - "chats": WhatsApp/Telegram/Instagram/Discord or any messaging conversation
 - "inspo": aesthetic inspiration: outfits, room decor, art, design, moodboards
-- "read_later": articles, posts, threads, videos, products, links
-- "sent": a code snippet, an error, or a small piece of an app or page
+- "read_later": articles, blog posts, tweets/threads, LinkedIn posts, videos,
+  products, docs or tutorials about any topic (tech, AI, careers...) to read later
 - "important": receipts, payments, tickets, bookings, addresses, deadlines
 - "sensitive": ONLY if the description explicitly mentions a password, login,
   OTP, ID card, passport, or bank/card number. Otherwise never pick this.
 - "bin": memes, jokes, home/lock screens, blank or accidental captures, games
-reason: under 8 words saying what it shows.
+reason: under 8 words saying what it shows, WITHOUT repeating any secret.
 
-Description of the screenshot:
 """
 
 
@@ -103,18 +101,54 @@ def ollama(payload):
         return json.loads(r.read())["response"]
 
 
+OCR_PS = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | ? {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($op, $t) { $x = $asTask.MakeGenericMethod($t).Invoke($null, @($op)); $x.Wait() | Out-Null; $x.Result }
+$f = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($env:SS_PATH)) ([Windows.Storage.StorageFile])
+$s = Await ($f.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$d = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($s)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$b = Await ($d.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$r = Await ([Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages().RecognizeAsync($b)) ([Windows.Media.Ocr.OcrResult])
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$r.Text
+"""
+
+
+def read_text(path):
+    """Built-in Windows OCR: local, nothing to install. Returns '' if it fails."""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", OCR_PS],
+                             env={**os.environ, "SS_PATH": str(path.resolve())},
+                             capture_output=True, timeout=60,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return out.stdout.decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
 def ask_model(path, model, text_model):
     img = base64.b64encode(path.read_bytes()).decode()
     if not text_model:  # one capable vision model does everything
         return parse_answer(json.loads(ollama(
             {"model": model, "prompt": PROMPT, "images": [img], "format": "json"})))
-    # Small vision models (moondream) can't follow an 8-option prompt; they echo
-    # the first option. So: the vision model only describes, a text model decides.
-    caption = ollama({"model": model, "images": [img], "prompt":
-                      "Describe this screenshot in two sentences: what app or kind "
-                      "of content it is, and what it shows. Quote any visible title."})
+    # Small vision models (moondream) can't read text-heavy screenshots and can't
+    # follow an 8-option prompt. So read the actual text with OCR, and let a text
+    # model decide. The vision model is only asked when there's little text.
+    text = read_text(path)
+    info = f"Text in the screenshot (OCR):\n{text[:1500]}\n"
+    if len(text.split()) < 15:
+        caption = ollama({"model": model, "images": [img],
+                          "prompt": "Describe this image in one sentence."})
+        info += f"\nWhat it looks like: {caption.strip()}\n"
     return parse_answer(json.loads(ollama({"model": text_model, "format": "json",
-                                           "prompt": TEXT_PROMPT + caption.strip()})))
+                                           "prompt": TEXT_PROMPT + info})))
 
 
 def ask_api(path, model):
@@ -139,7 +173,8 @@ def ask_api(path, model):
 def parse_answer(data):
     tier = str(data.get("tier", "")).lower()
     reason = str(data.get("reason", "")).strip().lower()
-    if tier not in KEYS:
+    # "sent" is about why you took it, which only you know: never the AI's call.
+    if tier not in KEYS or tier == "sent":
         raise ValueError(f"model said {tier!r}")
     # A reason that is empty or just repeats the category means it didn't really look.
     if not reason or reason.replace("_", " ") in (tier.replace("_", " "), "..."):
@@ -264,14 +299,15 @@ def watcher(folder, out):
 class Popup:
     """One small always-on-top window per screenshot, bottom-right corner."""
 
-    def __init__(self, root, shot, args, on_done):
+    def __init__(self, root, shot, args, results, waiting, on_done):
         self.shot, self.args, self.on_done = shot, args, on_done
+        self.results = results  # shared dict, filled by the background classifier
         self.guess = self.reason = None
         self.remaining = args.timeout
         self.done = False
 
         w = self.win = tk.Toplevel(root)
-        w.title("ss-triage")
+        w.title("ss-triage" + (f"  (+{waiting} waiting)" if waiting else ""))
         w.attributes("-topmost", True)
         w.resizable(False, False)
         self.status = tk.Label(w, text=f"📸  {shot.name}\nAI is looking…",
@@ -295,28 +331,13 @@ class Popup:
         w.geometry(f"+{x}+{y}")
         w.focus_force()
 
-        self.results = queue.Queue()
-        threading.Thread(target=self.classify, daemon=True).start()
         w.after(200, self.poll)
-
-    def classify(self):
-        try:
-            if self.args.fake:
-                res = fake_classify(self.shot)
-            elif self.args.api:
-                res = ask_api(self.shot, self.args.api_model)
-            else:
-                res = ask_model(self.shot, self.args.model, self.args.text_model)
-            self.results.put(res)
-        except Exception as e:
-            self.results.put(e)
 
     def poll(self):
         if self.done:
             return
-        try:
-            res = self.results.get_nowait()
-        except queue.Empty:
+        res = self.results.pop(self.shot, None)
+        if res is None:
             self.win.after(200, self.poll)
             return
         if isinstance(res, Exception):
@@ -378,8 +399,35 @@ def main():
 
     root = tk.Tk()
     root.withdraw()
-    incoming = queue.Queue()
-    threading.Thread(target=watcher, args=(args.folder, incoming), daemon=True).start()
+    incoming, to_classify, results = queue.Queue(), queue.Queue(), {}
+
+    def classifier():
+        # Starts on each screenshot as soon as it's taken, one at a time (the
+        # local models can't run in parallel on 8 GB anyway), so a burst of
+        # screenshots is mostly guessed by the time each popup appears.
+        while True:
+            shot = to_classify.get()
+            try:
+                if args.fake:
+                    res = fake_classify(shot)
+                elif args.api:
+                    res = ask_api(shot, args.api_model)
+                else:
+                    res = ask_model(shot, args.model, args.text_model)
+            except Exception as e:
+                res = e
+            results[shot] = res
+
+    def fan_out():
+        while True:
+            shot = raw.get()
+            to_classify.put(shot)
+            incoming.put(shot)
+
+    raw = queue.Queue()
+    threading.Thread(target=watcher, args=(args.folder, raw), daemon=True).start()
+    threading.Thread(target=fan_out, daemon=True).start()
+    threading.Thread(target=classifier, daemon=True).start()
     busy = [False]
     last_sweep = [0.0]
 
@@ -399,7 +447,8 @@ def main():
             else:
                 if shot.exists():
                     busy[0] = True
-                    Popup(root, shot, args, on_done=lambda: busy.__setitem__(0, False))
+                    Popup(root, shot, args, results, incoming.qsize(),
+                          on_done=lambda: busy.__setitem__(0, False))
         root.after(300, pump)
 
     if args.api and not args.fake:
