@@ -159,8 +159,9 @@ def ask_model(path, model, text_model):
         caption = ollama({"model": model, "images": [img],
                           "prompt": "Describe this image in one sentence."})
         info += f"\nWhat it looks like: {caption.strip()}\n"
-    return parse_answer(json.loads(ollama({"model": text_model, "format": "json",
-                                           "prompt": TEXT_PROMPT + info})))
+    answer = json.loads(ollama({"model": text_model, "format": "json",
+                                "prompt": TEXT_PROMPT + info}))
+    return overrule(text, *parse_answer(answer))
 
 
 def ask_api(path, model):
@@ -179,7 +180,28 @@ def ask_api(path, model):
     with urllib.request.urlopen(req, timeout=120) as r:
         text = json.loads(r.read())["choices"][0]["message"]["content"]
     # Hosted models may wrap JSON in prose or ``` fences; take the {...} part.
-    return parse_answer(json.loads(text[text.index("{"):text.rindex("}") + 1]))
+    return overrule("", *parse_answer(json.loads(text[text.index("{"):text.rindex("}") + 1])))
+
+
+# Small models often give the right reason but the wrong folder ("bank login
+# details" -> read_later). When the words are clear, plain rules win.
+OVERRULES = [
+    ("sensitive", r"\b(password|passcode|log ?in|sign ?in|otp|one.time|bank|account (no|number)|"
+                  r"ifsc|upi|card number|cvv|debit|credit card|aadhaa?r|pan card|passport|"
+                  r"driving licen[cs]e|ssn)\b"),
+    ("inspo", r"\b(decor|interior|outfit|aesthetic|moodboard|mood board|pinterest|fashion|"
+              r"bedroom|living room|makeup|nails|hairstyle)\b"),
+]
+
+
+def overrule(ocr_text, tier, reason, title):
+    said = f"{reason} {title}".lower()
+    for forced, pattern in OVERRULES:
+        # Sensitive also checks the screenshot's own text: better safe than binned.
+        haystack = said + (" " + ocr_text.lower() if forced == "sensitive" else "")
+        if tier != forced and re.search(pattern, haystack):
+            return forced, reason, title
+    return tier, reason, title
 
 
 def parse_answer(data):
@@ -380,6 +402,11 @@ class Popup:
         if self.done:
             return
         label = dict((k, l) for k, _, l in CHOICES)[self.guess]
+        if self.guess == "bin":
+            # The AI may suggest throwing something out, but only you can do it.
+            self.status.config(text=f"📸  Looks like: {self.reason}\n"
+                                    f"→ Bin? Press {KEYS.index('bin') + 1} to confirm, or pick another.")
+            return
         self.status.config(text=f"📸  Looks like: {self.reason}\n"
                                 f"→ {label}   (auto in {self.remaining}s)")
         if self.remaining <= 0:
