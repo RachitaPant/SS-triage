@@ -8,10 +8,12 @@ Take a screenshot and a small popup appears with a local AI's guess already high
 |---|---|
 | 1 | `Class notes/` |
 | 2 | `Chats/` |
-| 3 | `Read later/` (binned after 14 days unless you move it out) |
-| 4 | `Important/` |
-| 5 | `Sensitive/` |
-| 6 | Recycle Bin (recoverable) |
+| 3 | `Inspo/` |
+| 4 | `Read later/` (binned after 14 days unless you move it out) |
+| 5 | `Sent/` (screenshots taken just to paste or share; binned after 1 day) |
+| 6 | `Important/` |
+| 7 | `Sensitive/` |
+| 8 | Recycle Bin (recoverable) |
 | Esc | leave it where it is |
 
 Windows only (it uses the Windows Recycle Bin). Python 3.9+, standard library only.
@@ -31,7 +33,7 @@ set OPENROUTER_API_KEY=...
 python ss_triage.py --api
 ```
 
-Options: `--timeout 5` (seconds before auto-accept), `--expire 14` (days for Read later), `--api-model`, and a folder path. The default folder is `Pictures\Screenshots`, or OneDrive's `Pictures\Screenshots*` when that's where Windows saves them.
+Options: `--timeout 5` (seconds before auto-accept), `--expire 14` (days for Read later), `--sent-expire 1` (days for Sent), `--api-model`, and a folder path. The default folder is `Pictures\Screenshots`, or OneDrive's `Pictures\Screenshots*` when that's where Windows saves them.
 
 Every decision is logged to `triage-log.tsv` in the screenshots folder.
 

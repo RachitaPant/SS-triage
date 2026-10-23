@@ -3,10 +3,14 @@
 Take a screenshot -> a small popup appears with the local AI's guess highlighted.
 Press a number key (or click) to choose, or ignore it and the guess is applied.
 
-    1 Class notes   2 Chats   3 Read later   4 Important   5 Sensitive   6 Bin
+    1 Class notes  2 Chats  3 Inspo  4 Read later  5 Sent
+    6 Important    7 Sensitive      8 Bin
 
-"Read later" is honest: anything still sitting there after --expire days
-goes to the Recycle Bin. Want to keep it? Move it out of that folder.
+Two folders clean themselves up (Recycle Bin, so it's recoverable):
+    Read later   binned after --expire days (default 14). Be honest.
+    Sent         for screenshots taken just to paste into a chat or an AI;
+                 binned after --sent-expire days (default 1).
+Want to keep one? Move it out of that folder.
 Esc leaves the screenshot where it is.
 
 Usage:
@@ -39,12 +43,15 @@ from pathlib import Path
 CHOICES = [  # (key, folder, label)
     ("class_notes", "Class notes", "Class notes"),
     ("chats", "Chats", "Chats"),
+    ("inspo", "Inspo", "Inspo"),
     ("read_later", "Read later", "Read later"),
+    ("sent", "Sent", "Sent"),
     ("important", "Important", "Important"),
     ("sensitive", "Sensitive", "Sensitive"),
     ("bin", None, "Bin"),
 ]
 KEYS = [c[0] for c in CHOICES]
+EXPIRING = {"read_later", "sent"}  # binned after --expire / --sent-expire days
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -60,7 +67,10 @@ tier must be one of:
 - "important": receipts, payments, tickets, bookings, addresses, deadlines, errors
 - "class_notes": lecture slides, notes, textbooks, whiteboards, assignments
 - "chats": WhatsApp/Telegram/Instagram/Discord or any messaging conversation
+- "inspo": aesthetic inspiration: outfits, room decor, art, design, moodboards, pins
 - "read_later": articles, posts, threads, videos, products, links to check later
+- "sent": a quick capture made only to share or paste somewhere: a code snippet,
+  an error, a small piece of a page or app, a reel/post to forward to a friend
 - "bin": memes, jokes, home/lock screens, blank or accidental captures, games
 If anything sensitive is visible, choose "sensitive".
 reason: under 8 words, describing it WITHOUT repeating any secret."""
@@ -111,6 +121,8 @@ def fake_classify(path):
              ("important", ("receipt", "ticket", "invoice", "payment")),
              ("class_notes", ("lecture", "notes", "slide")),
              ("chats", ("chat", "whatsapp")),
+             ("inspo", ("inspo", "outfit", "pinterest")),
+             ("sent", ("share", "snippet")),
              ("read_later", ("article", "thread", "post"))]
     for tier, words in rules:
         if any(w in name for w in words):
@@ -155,32 +167,32 @@ def apply_choice(shot, tier, folder, reason, by):
         (folder / sub).mkdir(exist_ok=True)
         dest = unique_dest(folder / sub / shot.name)
         shutil.move(str(shot), str(dest))
-        if tier == "read_later":
-            state = load_state(folder)
+        if tier in EXPIRING:
+            state = load_state(folder, sub)
             state[dest.name] = time.time()
-            save_state(folder, state)
+            save_state(folder, sub, state)
     with open(folder / "triage-log.tsv", "a", encoding="utf-8") as log:
         log.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{tier}\t{by}\t{shot.name}\t{reason}\n")
     print(f"{datetime.now():%H:%M:%S}  {tier:<12} ({by})  {shot.name}")
 
 
-def load_state(folder):
+def load_state(folder, sub):
     try:
-        return json.loads((folder / "Read later" / STATE_FILE).read_text())
+        return json.loads((folder / sub / STATE_FILE).read_text())
     except (OSError, ValueError):
         return {}
 
 
-def save_state(folder, state):
-    (folder / "Read later").mkdir(exist_ok=True)
-    (folder / "Read later" / STATE_FILE).write_text(json.dumps(state, indent=1))
+def save_state(folder, sub, state):
+    (folder / sub).mkdir(exist_ok=True)
+    (folder / sub / STATE_FILE).write_text(json.dumps(state, indent=1))
 
 
-def sweep_read_later(folder, days):
-    """Bin anything that sat in Read later longer than `days`."""
-    state, now, binned = load_state(folder), time.time(), 0
+def sweep_expiring(folder, sub, days):
+    """Bin anything that sat in an expiring folder longer than `days`."""
+    state, now, binned = load_state(folder, sub), time.time(), 0
     for name, added in list(state.items()):
-        f = folder / "Read later" / name
+        f = folder / sub / name
         if not f.exists():          # you moved it out: rescued
             del state[name]
         elif now - added > days * 86400:
@@ -188,8 +200,8 @@ def sweep_read_later(folder, days):
             del state[name]
             binned += 1
     if binned:
-        save_state(folder, state)
-        print(f"{datetime.now():%H:%M:%S}  binned {binned} unread 'Read later' screenshot(s)")
+        save_state(folder, sub, state)
+        print(f"{datetime.now():%H:%M:%S}  binned {binned} expired '{sub}' screenshot(s)")
 
 
 # ---------- watching ----------
@@ -325,6 +337,7 @@ def main():
     ap.add_argument("--fake", action="store_true", help="skip the model, use simple rules")
     ap.add_argument("--timeout", type=int, default=5, help="seconds before the AI guess is applied")
     ap.add_argument("--expire", type=float, default=14, help="days before unread 'Read later' is binned")
+    ap.add_argument("--sent-expire", type=float, default=1, help="days before 'Sent' is binned")
     args = ap.parse_args()
     if not args.folder.is_dir():
         sys.exit(f"Not a folder: {args.folder}")
@@ -340,7 +353,8 @@ def main():
         if time.time() - last_sweep[0] > 3600:
             last_sweep[0] = time.time()
             try:
-                sweep_read_later(args.folder, args.expire)
+                sweep_expiring(args.folder, "Read later", args.expire)
+                sweep_expiring(args.folder, "Sent", args.sent_expire)
             except Exception as e:
                 print(f"  ! sweep failed: {e}")
         if not busy[0]:
