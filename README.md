@@ -21,13 +21,13 @@ Windows only (it uses the Windows Recycle Bin). Python 3.9+, standard library on
 ## Run
 
 ```bash
-# local, private (default): Ollama + a small text model
+# local, private (default): a text model, plus a small vision model for pictures
 ollama pull qwen2.5:3b-instruct
+ollama pull moondream
 python ss_triage.py
 
-# also describe pictures with little text (needs ~1.3 GB more RAM)
-ollama pull moondream
-python ss_triage.py --model moondream
+# low on RAM: skip the vision model, pictures become your call
+python ss_triage.py --model ""
 
 # no model, simple filename rules: for trying the popup
 python ss_triage.py --fake
@@ -43,10 +43,11 @@ Options: `--timeout 5` (seconds before auto-accept), `--expire 14` (days for Rea
 
 1. **Reads the text** in the screenshot with Windows' built-in OCR (local, nothing to install).
 2. **A small text model** (`qwen2.5:3b-instruct`) picks a folder, a reason, and a short title.
+   For pictures with little text (inspo, outfits, decor), `moondream` describes the image first.
 3. **Plain rules have the last word.** Small models often get the reason right ("bank login details") but the folder wrong, so words like password, OTP, bank, Aadhaar or passport force **Sensitive**, and decor, outfit or moodboard force **Inspo**.
 4. **The file is renamed** to something you can search for: `Screenshot 2026-10-23 162659.png` becomes `2026-10-23 coding agents internals week 1.png`. Words with 3+ digits are dropped, so an OTP or card number never ends up in a filename.
 
-Some decisions are always yours: the AI never picks **Sent** (only you know why you took it), and a **Bin** guess waits for your keypress. Pictures with little text are "your call" unless you add `--model`. After 30 seconds without a guess the popup says so, and after 90 the AI gives up on that one.
+Some decisions are always yours: the AI never picks **Sent** (only you know why you took it), and a **Bin** guess waits for your keypress. Pictures with little text are described by `moondream`, which is unloaded straight after so both models are never in RAM at once. After 30 seconds without a guess the popup says so, and after 90 the AI gives up on that one.
 
 Every decision (old name, new name, who chose) is logged to `triage-log.tsv` in the screenshots folder.
 

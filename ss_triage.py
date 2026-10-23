@@ -156,7 +156,9 @@ def ask_model(path, model, text_model):
     if len(text.split()) < 15:
         if not model:  # no vision model: a picture with little text is your call
             raise ValueError("not much text to go on")
-        caption = ollama({"model": model, "images": [img],
+        # keep_alive 0: unload right after, so it and the text model are never
+        # both sitting in RAM on an 8 GB laptop.
+        caption = ollama({"model": model, "images": [img], "keep_alive": 0,
                           "prompt": "Describe this image in one sentence."})
         info += f"\nWhat it looks like: {caption.strip()}\n"
     answer = json.loads(ollama({"model": text_model, "format": "json",
@@ -438,9 +440,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path, nargs="?", default=DEFAULT_DIR)
-    ap.add_argument("--model", default="",
-                    help="optional vision model for pictures with little text, e.g. moondream "
-                         "(needs ~1.3 GB more RAM)")
+    ap.add_argument("--model", default="moondream",
+                    help="vision model, used only for pictures with little text; "
+                         "\"\" = skip it and make those your call")
     ap.add_argument("--text-model", default="qwen2.5:3b-instruct",
                     help="text model that picks the folder; \"\" = let --model do it all")
     ap.add_argument("--api", action="store_true",
