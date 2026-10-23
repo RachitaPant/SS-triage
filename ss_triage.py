@@ -106,7 +106,8 @@ login"), NEVER a number, password or code.
 def ollama(payload):
     req = urllib.request.Request(OLLAMA_URL, json.dumps({**payload, "stream": False}).encode(),
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as r:
+    # Fail fast: on a busy 8 GB laptop one stuck call would block the whole queue.
+    with urllib.request.urlopen(req, timeout=90) as r:
         return json.loads(r.read())["response"]
 
 
@@ -153,6 +154,8 @@ def ask_model(path, model, text_model):
     text = read_text(path)
     info = f"Text in the screenshot (OCR):\n{text[:1500]}\n"
     if len(text.split()) < 15:
+        if not model:  # no vision model: a picture with little text is your call
+            raise ValueError("not much text to go on")
         caption = ollama({"model": model, "images": [img],
                           "prompt": "Describe this image in one sentence."})
         info += f"\nWhat it looks like: {caption.strip()}\n"
@@ -322,6 +325,7 @@ class Popup:
         self.shot, self.args, self.on_done = shot, args, on_done
         self.results = results  # shared dict, filled by the background classifier
         self.guess = self.reason = self.title = None
+        self.waited, self.slow_shown = 0.0, False
         self.remaining = args.timeout
         self.done = False
 
@@ -357,6 +361,11 @@ class Popup:
             return
         res = self.results.pop(self.shot, None)
         if res is None:
+            self.waited += 0.2
+            if self.waited >= 30 and not self.slow_shown:
+                self.slow_shown = True
+                self.status.config(text=f"📸  {self.shot.name}\nAI is slow (low memory?). "
+                                        "Pick one, or keep waiting.")
             self.win.after(200, self.poll)
             return
         if isinstance(res, Exception):
@@ -402,7 +411,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path, nargs="?", default=DEFAULT_DIR)
-    ap.add_argument("--model", default="moondream", help="vision model (describes the screenshot)")
+    ap.add_argument("--model", default="",
+                    help="optional vision model for pictures with little text, e.g. moondream "
+                         "(needs ~1.3 GB more RAM)")
     ap.add_argument("--text-model", default="qwen2.5:3b-instruct",
                     help="text model that picks the folder; \"\" = let --model do it all")
     ap.add_argument("--api", action="store_true",
