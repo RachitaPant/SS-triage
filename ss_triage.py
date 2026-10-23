@@ -31,6 +31,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -63,7 +64,7 @@ DEFAULT_DIR = next((d for d in [Path.home() / "Pictures" / "Screenshots",
 STATE_FILE = ".read-later.json"
 
 PROMPT = """Classify this screenshot. Reply with only JSON:
-{"tier": "...", "reason": "..."}
+{"tier": "...", "reason": "...", "title": "..."}
 tier must be one of:
 - "sensitive": passwords, logins, OTPs, ID cards, bank/card numbers, balances
 - "important": receipts, payments, tickets, bookings, addresses, deadlines, errors
@@ -73,10 +74,14 @@ tier must be one of:
 - "read_later": articles, posts, threads, videos, products, links to check later
 - "bin": memes, jokes, home/lock screens, blank or accidental captures, games
 If anything sensitive is visible, choose "sensitive".
-reason: under 8 words, describing it WITHOUT repeating any secret."""
+reason: under 8 words, describing it WITHOUT repeating any secret.
+title: 3-6 lowercase words to use as a searchable filename, naming the
+topic (e.g. "coding agents internals week 1", "goa train ticket",
+"beige room decor"). For sensitive ones name the kind only (e.g. "bank
+login"), NEVER a number, password or code."""
 
 TEXT_PROMPT = """Someone took a screenshot. Pick where it should be filed.
-Reply with only JSON: {"tier": "...", "reason": "..."}
+Reply with only JSON: {"tier": "...", "reason": "...", "title": "..."}
 tier must be one of:
 - "class_notes": lecture slides, notes, textbooks, whiteboards, assignments
 - "chats": WhatsApp/Telegram/Instagram/Discord or any messaging conversation
@@ -88,6 +93,10 @@ tier must be one of:
   OTP, ID card, passport, or bank/card number. Otherwise never pick this.
 - "bin": memes, jokes, home/lock screens, blank or accidental captures, games
 reason: under 8 words saying what it shows, WITHOUT repeating any secret.
+title: 3-6 lowercase words to use as a searchable filename, naming the
+topic (e.g. "coding agents internals week 1", "goa train ticket",
+"beige room decor"). For sensitive ones name the kind only (e.g. "bank
+login"), NEVER a number, password or code.
 
 """
 
@@ -179,7 +188,15 @@ def parse_answer(data):
     # A reason that is empty or just repeats the category means it didn't really look.
     if not reason or reason.replace("_", " ") in (tier.replace("_", " "), "..."):
         raise ValueError("model gave no real reason")
-    return tier, str(data.get("reason", ""))[:60]
+    return tier, str(data.get("reason", ""))[:60], clean_title(data.get("title"))
+
+
+def clean_title(title):
+    """Make the model's title safe as a filename; '' if unusable."""
+    words = re.sub(r"[^a-z0-9 ]+", " ", str(title or "").lower()).split()[:6]
+    # Belt and braces: drop anything that looks like a number/code (OTPs, cards).
+    words = [w for w in words if not (sum(c.isdigit() for c in w) >= 3)]
+    return " ".join(words)
 
 
 def fake_classify(path):
@@ -193,10 +210,10 @@ def fake_classify(path):
              ("read_later", ("article", "thread", "post"))]
     for tier, words in rules:
         if any(w in name for w in words):
-            return tier, "keyword in filename"
+            return tier, "keyword in filename", ""
     if path.stat().st_size < 30_000:
-        return "bin", "tiny file, probably accidental"
-    return "read_later", "no strong signal"
+        return "bin", "tiny file, probably accidental", ""
+    return "read_later", "no strong signal", ""
 
 
 # ---------- file actions ----------
@@ -225,14 +242,15 @@ def unique_dest(dest):
     return dest
 
 
-def apply_choice(shot, tier, folder, reason, by):
+def apply_choice(shot, tier, folder, reason, by, title=""):
     sub = dict((k, f) for k, f, _ in CHOICES)[tier]
     if sub is None:
         to_recycle_bin(shot)
         dest = None
     else:
         (folder / sub).mkdir(exist_ok=True)
-        dest = unique_dest(folder / sub / shot.name)
+        name = f"{datetime.fromtimestamp(shot.stat().st_mtime):%Y-%m-%d} {title}{shot.suffix}" if title else shot.name
+        dest = unique_dest(folder / sub / name)
         shutil.move(str(shot), str(dest))
         if tier in EXPIRING:
             state = load_state(folder, sub)
@@ -240,7 +258,7 @@ def apply_choice(shot, tier, folder, reason, by):
             save_state(folder, sub, state)
     with open(folder / "triage-log.tsv", "a", encoding="utf-8") as log:
         log.write(f"{datetime.now():%Y-%m-%d %H:%M}\t{tier}\t{by}\t{shot.name}\t{reason}\n")
-    print(f"{datetime.now():%H:%M:%S}  {tier:<12} ({by})  {shot.name}")
+    print(f"{datetime.now():%H:%M:%S}  {tier:<12} ({by})  {shot.name}" + (f" -> {dest.name}" if dest else ""))
 
 
 def load_state(folder, sub):
@@ -302,7 +320,7 @@ class Popup:
     def __init__(self, root, shot, args, results, waiting, on_done):
         self.shot, self.args, self.on_done = shot, args, on_done
         self.results = results  # shared dict, filled by the background classifier
-        self.guess = self.reason = None
+        self.guess = self.reason = self.title = None
         self.remaining = args.timeout
         self.done = False
 
@@ -344,7 +362,7 @@ class Popup:
             # No guess -> no auto-accept. You decide.
             self.status.config(text=f"📸  {self.shot.name}\nAI couldn't tell ({res}). Your call.")
             return
-        self.guess, self.reason = res
+        self.guess, self.reason, self.title = res
         self.buttons[self.guess].config(relief="sunken", bg="#ffd966")
         self.tick()
 
@@ -364,7 +382,7 @@ class Popup:
         if self.done:
             return
         try:
-            apply_choice(self.shot, tier, self.args.folder, self.reason or "", by)
+            apply_choice(self.shot, tier, self.args.folder, self.reason or "", by, self.title or "")
         except Exception as e:
             print(f"  ! {self.shot.name}: {e}")
         self.close()
